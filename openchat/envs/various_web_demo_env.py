@@ -1,7 +1,8 @@
 import random
 import base64
 from collections import OrderedDict
-import time
+import torch
+import random
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from queue import Queue, Empty
@@ -9,7 +10,7 @@ from threading import Thread
 import time
 import traceback
 import re
-
+import gc
 from openchat.base.envs.base import BaseEnvironment
 from openchat.base import (
     BaseAgent,
@@ -18,6 +19,7 @@ from openchat.base import (
     SingleTurn,
     PromptAgent,
 )
+
 
 class VariousWebServerEnvironment(BaseEnvironment):
 
@@ -28,12 +30,12 @@ class VariousWebServerEnvironment(BaseEnvironment):
         self.app = Flask(__name__)
         self.requests_queue = Queue()
         self.users = OrderedDict()
-        self.agents = {}    # key=agent name, value=agent obj
+        self.agents = {}  # key=agent name, value=agent obj
         self.max_hold_user = 50
         CORS(self.app)
 
     def start(self, agents: list, **kwargs):
-        spliter = re.compile('<name[013456789]>:', re.I)
+        remove_token = re.compile('</?name[03456789]>', re.I)
 
         # parsing conformed model name and obj
         for agent_obj in agents:
@@ -64,7 +66,7 @@ class VariousWebServerEnvironment(BaseEnvironment):
                                                           requests['input'][1],
                                                           requests['input'][2],
                                                           requests['input'][3],
-                                                          requests['input'][4],)
+                                                          requests['input'][4], )
                         except Exception as e:
                             traceback.print_exc()
                             requests["output"] = e
@@ -73,9 +75,9 @@ class VariousWebServerEnvironment(BaseEnvironment):
 
         # generate bot's message
         def generate(user_id, bot_id, user_message, topic, agent: str):
+            gc.enable()
+            torch.cuda.empty_cache()
             try:
-                start = time.time()
-
                 # add new user
                 if user_id not in self.users:
                     self.clear_histories(user_id)
@@ -107,8 +109,8 @@ class VariousWebServerEnvironment(BaseEnvironment):
                     user_message = agent_obj.retrieve_knowledge(user_message)
 
                 if isinstance(agent_obj, PromptAgent):
-                    user_message.replace(user_id, '<name1>').replace(bot_id, '<name2>')
-                    user_message = f"<name1>: {user_message} <name2>:"
+                    # user_message.replace(user_id, '<name1>').replace(bot_id, '<name2>')
+                    user_message = user_id + f" : {user_message} " + bot_id + " :"
 
                 if isinstance(agent_obj, SingleTurn):
                     model_input = user_message
@@ -119,7 +121,7 @@ class VariousWebServerEnvironment(BaseEnvironment):
                         agent_obj,
                     )
 
-                self.add_user_message(user_id, user_message)
+                
 
                 if isinstance(agent_obj, PromptAgent):
                     bot_message = agent_obj.predict(
@@ -128,23 +130,48 @@ class VariousWebServerEnvironment(BaseEnvironment):
                         person_2=bot_id,
                         **kwargs,
                     )["output"]
-                    bot_message = spliter.split(bot_message)[0]
 
-                    self.add_bot_message(user_id, bot_message)
-                    bot_message = bot_message.replace('<name1>', user_id).replace('<name2>', bot_id)
-                    bot_message = bot_message.replace("<", "'").replace(">", "'")
+                    bot_message = remove_token.sub("", bot_message)
 
+
+
+                    # bot_message = bot_message.replace('<name1>', user_id).replace('<name2>', bot_id)
+                    # bot_message = bot_message.replace('<', '').replace('>', '')
                 else:
                     bot_message = agent_obj.predict(model_input, **kwargs)["output"]
-                    self.add_bot_message(user_id, bot_message)
 
-                print(time.time()-start)
-                return bot_message
+                confused = ["I'm so sorry I didn't quite get that, can you repeat it?",
+                            "I got a bit distracted, what was that again?",
+                            "I am having trouble understanding that, can you say it again differently?",
+                            "I didn't process that one correctly, can you try again?",
+                            "I am having a bit of trouble, can you type that again please?",
+                            "I don't always understand what you tell me, can you restate that?",
+                            "I seem to be confused, can you try again?",
+                            "I don't understand that exactly, can you rephrase it?"]
+                
+                index = random.randint(0, 7)
+                if "A:" in bot_message:
+                    bot_message = confused[index]
+
+                if bot_message == "A" or bot_message == "A ":
+                    bot_message = confused[index]
+
+                if "????" in bot_message:
+                    bot_message = confused[index]
+
+                if len(bot_message) == 0:
+                    bot_message = confused[index]
+                bot_messages = bot_message.split(user_id + " :")
+                bot_messages = bot_messages[0].split(":")
+                self.add_bot_message(user_id, bot_messages[0])
+                return bot_messages[0]
 
             except:
                 traceback.print_exc()
 
                 return "Error :("
+            finally:
+                gc.collect()
 
         ##
         # Sever health checking page.
@@ -188,9 +215,9 @@ class VariousWebServerEnvironment(BaseEnvironment):
                 text = text.replace('<', '"')
                 text = text.replace('>', '"')
 
-                bot_id = request.form['bot_id'].replace('<', '"').replace('>', '"')
-                topic = request.form['topic'].replace('<', '"').replace('>', '"')
-                agent = request.form['agent']   # agent's name
+                bot_id = "OpenChatAI"  # request.form['bot_id'].replace('<', '"').replace('>', '"')
+                topic = "I am OpenChatAI and I am chatting with my friend " + user_id + " on the internet using an instant messaging application.  We are enjoying talking to each other. Our conversation begins here."  # request.form['topic'].replace('<', '"').replace('>', '"')
+                agent = request.form['agent']  # agent's name
 
             except Exception as e:
                 return {"output": 'Bad request'}, 500
@@ -226,12 +253,10 @@ class VariousWebServerEnvironment(BaseEnvironment):
                 traceback.print_exc()
                 return {'output': 'Sorry, there was an error.'}, 500
 
-
         from waitress import serve
-        #serve(self.app, host='0.0.0.0', port=80)
-        serve(self.app, host='0.0.0.0', port=8000)
-        #self.app.run(host='0.0.0.0', port=80)
-
+        # serve(self.app, host='0.0.0.0', port=80)
+        # serve(self.app, host='0.0.0.0', port=8000)
+        self.app.run(host='0.0.0.0', port=8000)
 
     def pre_dialog_for_special_tasks(self, agent, user_id, bot_id, topic):
         if isinstance(agent, ConvAI2Agent):
@@ -246,17 +271,8 @@ class VariousWebServerEnvironment(BaseEnvironment):
     def pre_dialog_for_prompt(self, agent, user_id, bot_id, topic):
         agent.name = bot_id
 
-        '''
-        story = f'{user_id} and {bot_id} are talking about {topic}.'
-        story += f" {user_id} and {bot_id} start talking. "
-        story += f"{user_id}: Hello {bot_id}. "
-        story += f"{bot_id}: Hi {user_id}. "
-        '''
-        story = f'<name1> and <name2> are talking about {topic}.'
-        story += f" <name1> and <name2> start talking.\n"
-        story += f"<name1>: Hello <name2>. "
-        story += f"<name2>: Hi <name1>. "
-        
+        story = topic
+
         agent.add_prompt(
             self.histories,
             user_id,
